@@ -1,0 +1,495 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::Serverless-2016-10-31",
+  "Description": "Creates all resources needed to monitor the CO2 emissions of your AWS accounts via Cloud Carbon Footprint.",
+  "Resources": {
+    "AthenaQueryResultsBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {}
+    },
+    "BillingDataBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {}
+    },
+    "BillingDataBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "BillingDataBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2008-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "billingreports.amazonaws.com"
+              },
+              "Action": ["s3:GetBucketAcl", "s3:GetBucketPolicy"],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  ["arn:aws:s3:::", { "Ref": "BillingDataBucket" }]
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:aws:cur:us-east-1:",
+                        { "Ref": "AWS::AccountId" },
+                        ":definition/*"
+                      ]
+                    ]
+                  },
+                  "aws:SourceAccount": { "Ref": "AWS::AccountId" }
+                }
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "billingreports.amazonaws.com"
+              },
+              "Action": "s3:PutObject",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  ["arn:aws:s3:::", { "Ref": "BillingDataBucket" }, "/*"]
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:aws:cur:us-east-1:",
+                        { "Ref": "AWS::AccountId" },
+                        ":definition/*"
+                      ]
+                    ]
+                  },
+                  "aws:SourceAccount": { "Ref": "AWS::AccountId" }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "CurDefinition": {
+      "Type": "AWS::CUR::ReportDefinition",
+      "Properties": {
+        "AdditionalArtifacts": ["ATHENA"],
+        "Compression": "Parquet",
+        "Format": "Parquet",
+        "RefreshClosedReports": true,
+        "ReportName": "cost-and-usage-report",
+        "ReportVersioning": "OVERWRITE_REPORT",
+        "S3Bucket": {
+          "Ref": "BillingDataBucket"
+        },
+        "S3Prefix": "cost-and-usage-report",
+        "S3Region": "us-east-1",
+        "TimeUnit": "HOURLY"
+      }
+    },
+    "CloudCarbonFootprintUserPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "cloud-carbon-footprint-user-policy",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:GetWorkGroup"
+              ],
+              "Resource": "*",
+              "Effect": "Allow"
+            },
+            {
+              "Action": [
+                "s3:GetBucketLocation",
+                "s3:GetObject",
+                "s3:ListBucket",
+                "s3:ListBucketMultipartUploads",
+                "s3:ListMultipartUploadParts",
+                "s3:AbortMultipartUpload",
+                "s3:PutObject"
+              ],
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    ["arn:aws:s3:::", { "Ref": "BillingDataBucket" }]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    ["arn:aws:s3:::", { "Ref": "BillingDataBucket" }, "/*"]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    ["arn:aws:s3:::", { "Ref": "AthenaQueryResultsBucket" }]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:aws:s3:::",
+                      { "Ref": "AthenaQueryResultsBucket" },
+                      "/*"
+                    ]
+                  ]
+                }
+              ],
+              "Effect": "Allow"
+            },
+            {
+              "Action": [
+                "glue:GetDatabase",
+                "glue:GetTable",
+                "glue:GetPartitions"
+              ],
+              "Resource": "*",
+              "Effect": "Allow"
+            },
+            {
+              "Action": ["ce:GetRightsizingRecommendation"],
+              "Resource": "*",
+              "Effect": "Allow"
+            }
+          ]
+        },
+        "Users": [{ "Ref": "CloudCarbonFootprintUser" }]
+      }
+    },
+    "CloudCarbonFootprintUser": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "UserName": "cloud-carbon-footprint"
+      }
+    },
+    "CostAndUsageReportCrawlerComponentFunctionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["glue.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSGlueServiceRole"
+          }
+        ],
+        "Policies": [
+          {
+            "PolicyName": "cost-and-usage-report-crawler-component-function-role-policy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:*:*:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "glue:UpdateDatabase",
+                    "glue:UpdatePartition",
+                    "glue:CreateTable",
+                    "glue:UpdateTable",
+                    "glue:ImportCatalogToGlue"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["s3:GetObject", "s3:PutObject"],
+                  "Resource": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        { "Fn::Sub": "arn:${AWS::Partition}:s3:::" },
+                        { "Ref": "BillingDataBucket" },
+                        "*"
+                      ]
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "cost-and-usage-report-KMS-decryption-policy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": ["kms:Decrypt"],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "CostAndUsageReportCrawlerLambdaExecutorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "cost-and-usage-report-crawler-lambda-executor-policy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:*:*:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["glue:StartCrawler"],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "S3CostAndUsageReportLambdaExecutorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["lambda.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "s3-cost-and-usage-report-lambda-executor-role",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:*:*:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["s3:PutBucketNotification"],
+                  "Resource": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        { "Fn::Sub": "arn:${AWS::Partition}:s3:::" },
+                        { "Ref": "BillingDataBucket" }
+                      ]
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "CostAndUsageReportsGlueDatabase": {
+      "Type": "AWS::Glue::Database",
+      "Properties": {
+        "DatabaseInput": { "Name": "cost-and-usage-reports-database" },
+        "CatalogId": { "Ref": "AWS::AccountId" }
+      }
+    },
+    "CostAndUsageReportCrawler": {
+      "Type": "AWS::Glue::Crawler",
+      "Properties": {
+        "Name": "cost-and-usage-report-crawler",
+        "Description": "A recurring crawler that keeps your CUR table in Athena up-to-date.",
+        "Role": {
+          "Fn::GetAtt": [
+            "CostAndUsageReportCrawlerComponentFunctionRole",
+            "Arn"
+          ]
+        },
+        "DatabaseName": { "Ref": "CostAndUsageReportsGlueDatabase" },
+        "Targets": {
+          "S3Targets": [
+            {
+              "Path": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "s3://",
+                    { "Ref": "BillingDataBucket" },
+                    "/cost-and-usage-report/cost-and-usage-report/cost-and-usage-report"
+                  ]
+                ]
+              },
+              "Exclusions": [
+                "**.json",
+                "**.yml",
+                "**.sql",
+                "**.csv",
+                "**.gz",
+                "**.zip"
+              ]
+            }
+          ]
+        },
+        "SchemaChangePolicy": {
+          "UpdateBehavior": "UPDATE_IN_DATABASE",
+          "DeleteBehavior": "DELETE_FROM_DATABASE"
+        }
+      },
+      "DependsOn": [
+        "CostAndUsageReportsGlueDatabase",
+        "CostAndUsageReportCrawlerComponentFunctionRole"
+      ]
+    },
+    "CostAndUsageReportInitializerLambda": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": ["CostAndUsageReportCrawler"],
+      "Properties": {
+        "Code": {
+          "ZipFile": "const AWS = require('aws-sdk'); const response = require('./cfn-response'); exports.handler = function(event, context, callback) {\n  if (event.RequestType === 'Delete') {\n    response.send(event, context, response.SUCCESS);\n  } else {\n    const glue = new AWS.Glue();\n    glue.startCrawler({ Name: 'cost-and-usage-report-crawler' }, function(err, data) {\n      if (err) {\n        const responseData = JSON.parse(this.httpResponse.body);\n        if (responseData['__type'] == 'CrawlerRunningException') {\n          callback(null, responseData.Message);\n        } else {\n          const responseString = JSON.stringify(responseData);\n          if (event.ResponseURL) {\n            response.send(event, context, response.FAILED,{ msg: responseString });\n          } else {\n            callback(responseString);\n          }\n        }\n      }\n      else {\n        if (event.ResponseURL) {\n          response.send(event, context, response.SUCCESS);\n        } else {\n          callback(null, response.SUCCESS);\n        }\n      }\n    });\n  }\n};\n"
+        },
+        "Handler": "index.handler",
+        "Timeout": 30,
+        "Runtime": "nodejs12.x",
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": ["CostAndUsageReportCrawlerLambdaExecutorRole", "Arn"]
+        }
+      }
+    },
+    "S3CostAndUsageReportNotificationLambda": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": [
+        "CostAndUsageReportInitializerLambda",
+        "S3CostAndUsageReportEventLambdaPermission",
+        "S3CostAndUsageReportLambdaExecutorRole"
+      ],
+      "Properties": {
+        "Code": {
+          "ZipFile": "const AWS = require('aws-sdk'); const response = require('./cfn-response'); exports.handler = function(event, context, callback) {\n  const s3 = new AWS.S3();\n  const putConfigRequest = function(notificationConfiguration) {\n    return new Promise(function(resolve, reject) {\n      s3.putBucketNotificationConfiguration({\n        Bucket: event.ResourceProperties.BucketName,\n        NotificationConfiguration: notificationConfiguration\n      }, function(err, data) {\n        if (err) reject({ msg: this.httpResponse.body.toString(), error: err, data: data });\n        else resolve(data);\n      });\n    });\n  };\n  const newNotificationConfig = {};\n  if (event.RequestType !== 'Delete') {\n    newNotificationConfig.LambdaFunctionConfigurations = [{\n      Events: [ 's3:ObjectCreated:*' ],\n      LambdaFunctionArn: event.ResourceProperties.TargetLambdaArn || 'missing arn',\n      Filter: { Key: { FilterRules: [ { Name: 'prefix', Value: event.ResourceProperties.ReportKey } ] } }\n    }];\n  }\n  putConfigRequest(newNotificationConfig).then(function(result) {\n    response.send(event, context, response.SUCCESS, result);\n    callback(null, result);\n  }).catch(function(error) {\n    response.send(event, context, response.FAILED, error);\n    console.log(error);\n    callback(error);\n  });\n};\n"
+        },
+        "Handler": "index.handler",
+        "Timeout": 30,
+        "Runtime": "nodejs12.x",
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": ["S3CostAndUsageReportLambdaExecutorRole", "Arn"]
+        }
+      }
+    },
+    "S3CostAndUsageReportEventLambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": ["CostAndUsageReportInitializerLambda", "Arn"]
+        },
+        "Principal": "s3.amazonaws.com",
+        "SourceAccount": { "Ref": "AWS::AccountId" },
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              { "Fn::Sub": "arn:${AWS::Partition}:s3:::" },
+              { "Ref": "BillingDataBucket" }
+            ]
+          ]
+        }
+      }
+    },
+    "StartCostAndUsageReportCrawler": {
+      "Type": "Custom::AWSStartCURCrawler",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": ["CostAndUsageReportInitializerLambda", "Arn"]
+        }
+      }
+    },
+    "PutS3CostAndUsageReportNotification": {
+      "Type": "Custom::AWSPutS3CURNotification",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": ["S3CostAndUsageReportNotificationLambda", "Arn"]
+        },
+        "TargetLambdaArn": {
+          "Fn::GetAtt": ["CostAndUsageReportInitializerLambda", "Arn"]
+        },
+        "BucketName": {
+          "Ref": "BillingDataBucket"
+        },
+        "ReportKey": "cost-and-usage-report/cost-and-usage-report/cost-and-usage-report"
+      }
+    }
+  }
+}
